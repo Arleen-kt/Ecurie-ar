@@ -102,33 +102,31 @@ export default function App() {
   const [form, setForm]       = useState({email:"",password:"",error:""});
 
   useEffect(()=>{
-    (async()=>{
-      try {
-        const sess=await window.storage.get(SESS_KEY);
-        if(sess) setSession(JSON.parse(sess.value));
-        const d=await window.storage.get(DATA_KEY);
-        setData(d?JSON.parse(d.value):INIT_DATA);
-        if(!d) await window.storage.set(DATA_KEY,JSON.stringify(INIT_DATA));
-      } catch(e){ setData(INIT_DATA); }
-      setLoading(false);
-    })();
+    try {
+      const sess=localStorage.getItem(SESS_KEY);
+      if(sess) setSession(JSON.parse(sess));
+      const d=localStorage.getItem(DATA_KEY);
+      setData(d?JSON.parse(d):INIT_DATA);
+      if(!d) localStorage.setItem(DATA_KEY,JSON.stringify(INIT_DATA));
+    } catch(e){ setData(INIT_DATA); }
+    setLoading(false);
   },[]);
 
-  const save=useCallback(async(newData)=>{
+  const save=useCallback((newData)=>{
     setData(newData);
     setSaving(true);
-    try{ await window.storage.set(DATA_KEY,JSON.stringify(newData)); }catch(e){}
+    try{ localStorage.setItem(DATA_KEY,JSON.stringify(newData)); }catch(e){}
     setTimeout(()=>setSaving(false),600);
   },[]);
 
-  const login=async(account)=>{
+  const login=(account)=>{
     const sess={user:account,role:account.role};
     setSession(sess);
-    try{ await window.storage.set(SESS_KEY,JSON.stringify(sess)); }catch(e){}
+    try{ localStorage.setItem(SESS_KEY,JSON.stringify(sess)); }catch(e){}
   };
-  const logout=async()=>{
+  const logout=()=>{
     setSession(null);
-    try{ await window.storage.delete(SESS_KEY); }catch(e){}
+    try{ localStorage.removeItem(SESS_KEY); }catch(e){}
   };
   const tryLogin=()=>{
     const u=DEMO_ACCOUNTS.find(a=>a.email===form.email&&a.password===form.password);
@@ -2468,4 +2466,4 @@ function CavalierApp({session,data,save,saving,logout}){
       );})}
     </>}
   </div>);
-}pp
+}
