@@ -18,6 +18,64 @@ const DEMO_ACCOUNTS = [
 ];
 const SESS_KEY = "ecurie_ar_session";
 const DATA_KEY = "ecurie_ar_data_v2";
+
+const SUPABASE_URL = "https://vkcsrcpfuiajyilnmemo.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_4n5Bf_n759YzVxz5wZQgtA_hoBA2kFg";
+
+// Client Supabase léger sans dépendance externe
+const supabase = {
+  auth: {
+    signUp: async({email,password})=>{
+      const r = await fetch(`${SUPABASE_URL}/auth/v1/signup`,{method:"POST",headers:{"Content-Type":"application/json","apikey":SUPABASE_ANON_KEY},body:JSON.stringify({email,password})});
+      return r.json();
+    },
+    signInWithPassword: async({email,password})=>{
+      const r = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`,{method:"POST",headers:{"Content-Type":"application/json","apikey":SUPABASE_ANON_KEY},body:JSON.stringify({email,password})});
+      const data = await r.json();
+      if(data.access_token) localStorage.setItem("sb_token", data.access_token);
+      if(data.user) localStorage.setItem("sb_user", JSON.stringify(data.user));
+      return {data, error: data.error_description||data.error||null};
+    },
+    signOut: async()=>{
+      const token = localStorage.getItem("sb_token");
+      await fetch(`${SUPABASE_URL}/auth/v1/logout`,{method:"POST",headers:{"apikey":SUPABASE_ANON_KEY,"Authorization":`Bearer ${token}`}});
+      localStorage.removeItem("sb_token");
+      localStorage.removeItem("sb_user");
+      localStorage.removeItem("sb_profile");
+    },
+    getUser: ()=>{
+      const u = localStorage.getItem("sb_user");
+      return u ? JSON.parse(u) : null;
+    }
+  },
+  from: (table)=>({
+    select: async(cols="*")=>{
+      const token = localStorage.getItem("sb_token");
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?select=${cols}`,{headers:{"apikey":SUPABASE_ANON_KEY,"Authorization":`Bearer ${token}`,"Content-Type":"application/json"}});
+      return {data: await r.json(), error: r.ok?null:"Erreur"};
+    },
+    insert: async(rows)=>{
+      const token = localStorage.getItem("sb_token");
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`,{method:"POST",headers:{"apikey":SUPABASE_ANON_KEY,"Authorization":`Bearer ${token}`,"Content-Type":"application/json","Prefer":"return=representation"},body:JSON.stringify(rows)});
+      return {data: await r.json(), error: r.ok?null:"Erreur"};
+    },
+    update: async(data)=>({
+      eq: async(col,val)=>{
+        const token = localStorage.getItem("sb_token");
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${col}=eq.${val}`,{method:"PATCH",headers:{"apikey":SUPABASE_ANON_KEY,"Authorization":`Bearer ${token}`,"Content-Type":"application/json","Prefer":"return=representation"},body:JSON.stringify(data)});
+        return {data: await r.json(), error: r.ok?null:"Erreur"};
+      }
+    }),
+    eq: (col,val)=>({
+      single: async()=>{
+        const token = localStorage.getItem("sb_token");
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${col}=eq.${val}&limit=1`,{headers:{"apikey":SUPABASE_ANON_KEY,"Authorization":`Bearer ${token}`,"Content-Type":"application/json"}});
+        const data = await r.json();
+        return {data: Array.isArray(data)?data[0]:data, error: r.ok?null:"Erreur"};
+      }
+    })
+  })
+};
 const COLORS = {
   teal:  {bg:"#E1F5EE",text:"#0F6E56",border:"#5DCAA5"},
   purple:{bg:"#EEEDFE",text:"#3C3489",border:"#AFA9EC"},
@@ -102,13 +160,17 @@ export default function App() {
   const [form, setForm]       = useState({email:"",password:"",error:""});
 
   useEffect(()=>{
-    try {
-      const sess=localStorage.getItem(SESS_KEY);
-      if(sess) setSession(JSON.parse(sess));
-      const d=localStorage.getItem(DATA_KEY);
-      setData(d?JSON.parse(d):INIT_DATA);
-      if(!d) localStorage.setItem(DATA_KEY,JSON.stringify(INIT_DATA));
-    } catch(e){ setData(INIT_DATA); }
+    const sbUser = supabase.auth.getUser();
+    if(sbUser){
+      const profile = localStorage.getItem("sb_profile");
+      if(profile){
+        const p = JSON.parse(profile);
+        setSession({user:{id:sbUser.id,email:sbUser.email,nom:p.prenom+" "+p.nom,role:p.role,avatar:(p.prenom||"?").slice(0,1)+(p.nom||"?").slice(0,1)},role:p.role});
+      }
+    }
+    const d = localStorage.getItem(DATA_KEY);
+    setData(d?JSON.parse(d):INIT_DATA);
+    if(!d) localStorage.setItem(DATA_KEY,JSON.stringify(INIT_DATA));
     setLoading(false);
   },[]);
 
@@ -125,13 +187,27 @@ export default function App() {
     try{ localStorage.setItem(SESS_KEY,JSON.stringify(sess)); }catch(e){}
   };
   const logout=()=>{
+    supabase.auth.signOut();
     setSession(null);
-    try{ localStorage.removeItem(SESS_KEY); }catch(e){}
   };
-  const tryLogin=()=>{
-    const u=DEMO_ACCOUNTS.find(a=>a.email===form.email&&a.password===form.password);
-    if(!u){setForm(p=>({...p,error:"Email ou mot de passe incorrect."}));return;}
-    login(u);
+  const tryLogin=async()=>{
+    if(!form.email||!form.password)return setForm(p=>({...p,error:"Email et mot de passe requis."}));
+    setForm(p=>({...p,error:""}));
+    // Vérifier si c'est un compte démo
+    const demoUser=DEMO_ACCOUNTS.find(a=>a.email===form.email&&a.password===form.password);
+    if(demoUser){login(demoUser);return;}
+    // Sinon connexion Supabase
+    const {data,error}=await supabase.auth.signInWithPassword({email:form.email,password:form.password});
+    if(error)return setForm(p=>({...p,error:"Email ou mot de passe incorrect."}));
+    const userId=data?.user?.id;
+    // Récupérer le profil
+    const {data:profile}=await supabase.from("profiles").eq("id",userId).single();
+    if(profile){
+      localStorage.setItem("sb_profile",JSON.stringify(profile));
+      login({id:userId,email:form.email,nom:profile.prenom+" "+profile.nom,role:profile.role,avatar:profile.avatar||"?"});
+    } else {
+      setForm(p=>({...p,error:"Profil introuvable. Contactez l'administrateur."}));
+    }
   };
 
   if(loading) return(
@@ -155,44 +231,196 @@ export default function App() {
 
 // ─── Écran connexion ──────────────────────────────────────────────────────────
 function LoginScreen({authMode,setAuthMode,form,setForm,tryLogin,login}){
+  const [signupStep,setSignupStep]=useState(1); // 1=compte, 2=profil
+  const [signup,setSignup]=useState({prenom:"",nom:"",email:"",password:"",password2:"",tel:"",ecurie:"",role:"cavalier",photo:null,error:""});
+  const [signupDone,setSignupDone]=useState(false);
+
+  const handlePhotoSU=(e)=>{
+    const f=e.target.files[0];if(!f)return;
+    const r=new FileReader();r.onload=(ev)=>setSignup(p=>({...p,photo:ev.target.result}));r.readAsDataURL(f);
+  };
+
+  const submitStep1=()=>{
+    if(!signup.email||!signup.password)return setSignup(p=>({...p,error:"Email et mot de passe requis."}));
+    if(signup.password!==signup.password2)return setSignup(p=>({...p,error:"Les mots de passe ne correspondent pas."}));
+    if(signup.password.length<6)return setSignup(p=>({...p,error:"Mot de passe trop court (6 caractères min)."}));
+    setSignup(p=>({...p,error:""}));setSignupStep(2);
+  };
+
+  const submitStep2=async()=>{
+    if(!signup.prenom||!signup.nom)return setSignup(p=>({...p,error:"Prénom et nom requis."}));
+    setSignup(p=>({...p,error:""}));
+    // Inscription Supabase
+    const {data,error} = await supabase.auth.signUp({email:signup.email,password:signup.password});
+    if(error)return setSignup(p=>({...p,error:"Erreur : "+error}));
+    const userId = data?.user?.id || data?.id;
+    // Sauvegarder le profil
+    const profile = {id:userId,prenom:signup.prenom,nom:signup.nom,email:signup.email,tel:signup.tel,ecurie:signup.ecurie,role:signup.role,avatar:signup.prenom.slice(0,1)+signup.nom.slice(0,1),photo:signup.photo||null,statut:signup.role==="gestionnaire"||signup.role==="centre"?"en_attente":"actif"};
+    await supabase.from("profiles").insert([profile]);
+    localStorage.setItem("sb_profile",JSON.stringify(profile));
+    const needsValidation=signup.role==="gestionnaire"||signup.role==="centre";
+    if(needsValidation){
+      setSignupDone("pending");
+    } else {
+      login({id:userId,email:signup.email,nom:signup.prenom+" "+signup.nom,role:signup.role,avatar:signup.prenom.slice(0,1)+signup.nom.slice(0,1)});
+    }
+  };
+
   const s={
     input:{border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",padding:"10px 14px",fontSize:14,width:"100%",background:"var(--color-background-primary)",color:"var(--color-text-primary)",boxSizing:"border-box"},
-    btn:(v)=>({border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",padding:"10px 20px",fontSize:13,fontWeight:500,cursor:"pointer",width:"100%",background:v==="primary"?"var(--color-text-primary)":"transparent",color:v==="primary"?"var(--color-background-primary)":"var(--color-text-primary)"}),
+    btn:(v)=>({border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",padding:"11px 20px",fontSize:13,fontWeight:500,cursor:"pointer",width:"100%",background:v==="primary"?"var(--color-text-primary)":"transparent",color:v==="primary"?"var(--color-background-primary)":"var(--color-text-primary)"}),
+    label:{fontSize:12,color:"var(--color-text-secondary)",display:"block",marginBottom:6,marginTop:12},
   };
+
+  const ROLE_OPTIONS=[
+    {key:"cavalier",label:"Cavalier",desc:"Suivi de mes chevaux, planning, exercices",icon:"🐴",free:true},
+    {key:"gestionnaire",label:"Gestionnaire d'écurie",desc:"Gestion complète, clients, planning",icon:"🏠",free:false},
+    {key:"centre",label:"Centre équestre",desc:"Planning des cours, inscriptions, événements",icon:"📅",free:false},
+    {key:"client",label:"Client / Pension",desc:"Suivi de mon cheval en pension, cours",icon:"👤",free:true},
+  ];
+
   return(
     <div style={{fontFamily:"var(--font-sans)",display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",padding:"2rem 1rem"}}>
-      <div style={{width:"100%",maxWidth:400}}>
-        <div style={{textAlign:"center",marginBottom:32}}>
+      <div style={{width:"100%",maxWidth:420}}>
+
+        {/* Logo */}
+        <div style={{textAlign:"center",marginBottom:28}}>
           <div style={{width:56,height:56,borderRadius:16,background:"var(--color-text-primary)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 12px"}}>
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-background-primary)" strokeWidth="1.8"><path d="M4 16s1-1 4-1 5 2 8 2 4-1 4-1V4s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="20" x2="4" y2="16"/></svg>
           </div>
           <h1 style={{margin:"0 0 4px",fontSize:20,fontWeight:500}}>Écuries AR</h1>
           <p style={{margin:0,fontSize:13,color:"var(--color-text-secondary)"}}>Votre espace équestre</p>
         </div>
+
         <div style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",padding:"1.75rem"}}>
+
+          {/* Onglets */}
           <div style={{display:"flex",borderBottom:"0.5px solid var(--color-border-tertiary)",marginBottom:20}}>
-            {[["login","Connexion"],["selector","Accès démo"]].map(([k,l])=>(
-              <button key={k} onClick={()=>setAuthMode(k)} style={{flex:1,background:"transparent",border:"none",borderBottom:authMode===k?"2px solid var(--color-text-primary)":"2px solid transparent",padding:"8px 0",fontSize:13,fontWeight:authMode===k?500:400,color:authMode===k?"var(--color-text-primary)":"var(--color-text-secondary)",cursor:"pointer"}}>{l}</button>
+            {[["login","Connexion"],["signup","Inscription"],["selector","Démo"]].map(([k,l])=>(
+              <button key={k} onClick={()=>{setAuthMode(k);setSignupStep(1);setSignupDone(false);}} style={{flex:1,background:"transparent",border:"none",borderBottom:authMode===k?"2px solid var(--color-text-primary)":"2px solid transparent",padding:"8px 0",fontSize:13,fontWeight:authMode===k?500:400,color:authMode===k?"var(--color-text-primary)":"var(--color-text-secondary)",cursor:"pointer"}}>{l}</button>
             ))}
           </div>
+
+          {/* CONNEXION */}
           {authMode==="login"&&(
-            <div style={{display:"flex",flexDirection:"column",gap:14}}>
-              <div>
-                <label style={{fontSize:12,color:"var(--color-text-secondary)",display:"block",marginBottom:6}}>Email</label>
-                <input placeholder="votre@email.fr" style={s.input} value={form.email} onChange={e=>setForm(p=>({...p,email:e.target.value,error:""}))}/>
-              </div>
-              <div>
-                <label style={{fontSize:12,color:"var(--color-text-secondary)",display:"block",marginBottom:6}}>Mot de passe</label>
-                <input type="password" placeholder="••••••••" style={s.input} value={form.password} onChange={e=>setForm(p=>({...p,password:e.target.value,error:""}))} onKeyDown={e=>{if(e.key==="Enter")tryLogin();}}/>
-              </div>
-              {form.error&&<p style={{margin:0,fontSize:12,color:"#A32D2D",background:"#FCEBEB",padding:"8px 12px",borderRadius:"var(--border-radius-md)"}}>{form.error}</p>}
+            <div style={{display:"flex",flexDirection:"column",gap:0}}>
+              <label style={s.label}>Email</label>
+              <input placeholder="votre@email.fr" style={s.input} value={form.email} onChange={e=>setForm(p=>({...p,email:e.target.value,error:""}))}/>
+              <label style={s.label}>Mot de passe</label>
+              <input type="password" placeholder="••••••••" style={{...s.input,marginBottom:16}} value={form.password} onChange={e=>setForm(p=>({...p,password:e.target.value,error:""}))} onKeyDown={e=>{if(e.key==="Enter")tryLogin();}}/>
+              {form.error&&<p style={{margin:"0 0 12px",fontSize:12,color:"#A32D2D",background:"#FCEBEB",padding:"8px 12px",borderRadius:"var(--border-radius-md)"}}>{form.error}</p>}
               <button onClick={tryLogin} style={s.btn("primary")}>Se connecter</button>
-              <p style={{margin:0,fontSize:11,color:"var(--color-text-secondary)",textAlign:"center"}}>Mot de passe démo : <strong>demo1234</strong></p>
+              <button onClick={()=>setAuthMode("signup")} style={{...s.btn(),marginTop:8,fontSize:12,color:"var(--color-text-secondary)"}}>Pas encore de compte ? S'inscrire</button>
             </div>
           )}
+
+          {/* INSCRIPTION */}
+          {authMode==="signup"&&!signupDone&&(
+            <div>
+              {/* Indicateur étapes */}
+              <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:20}}>
+                {[1,2].map(i=>(
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:8,flex:1}}>
+                    <div style={{width:28,height:28,borderRadius:"50%",background:signupStep>=i?"var(--color-text-primary)":"var(--color-background-secondary)",color:signupStep>=i?"var(--color-background-primary)":"var(--color-text-secondary)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:500,flexShrink:0}}>{i}</div>
+                    <span style={{fontSize:12,color:signupStep===i?"var(--color-text-primary)":"var(--color-text-secondary)",fontWeight:signupStep===i?500:400}}>{i===1?"Compte":"Profil"}</span>
+                    {i<2&&<div style={{flex:1,height:1,background:"var(--color-border-tertiary)"}}/>}
+                  </div>
+                ))}
+              </div>
+
+              {/* Étape 1 — Compte */}
+              {signupStep===1&&(
+                <div>
+                  <label style={s.label}>Email *</label>
+                  <input placeholder="votre@email.fr" style={s.input} value={signup.email} onChange={e=>setSignup(p=>({...p,email:e.target.value,error:""}))}/>
+                  <label style={s.label}>Mot de passe *</label>
+                  <input type="password" placeholder="6 caractères minimum" style={s.input} value={signup.password} onChange={e=>setSignup(p=>({...p,password:e.target.value,error:""}))}/>
+                  <label style={s.label}>Confirmer le mot de passe *</label>
+                  <input type="password" placeholder="Répétez le mot de passe" style={{...s.input,marginBottom:16}} value={signup.password2} onChange={e=>setSignup(p=>({...p,password2:e.target.value,error:""}))}/>
+                  {signup.error&&<p style={{margin:"0 0 12px",fontSize:12,color:"#A32D2D",background:"#FCEBEB",padding:"8px 12px",borderRadius:"var(--border-radius-md)"}}>{signup.error}</p>}
+                  <button onClick={submitStep1} style={s.btn("primary")}>Continuer →</button>
+                  <button onClick={()=>setAuthMode("login")} style={{...s.btn(),marginTop:8,fontSize:12,color:"var(--color-text-secondary)"}}>Déjà un compte ? Se connecter</button>
+                </div>
+              )}
+
+              {/* Étape 2 — Profil */}
+              {signupStep===2&&(
+                <div>
+                  {/* Photo de profil */}
+                  <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:16,padding:"12px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)"}}>
+                    <div style={{flexShrink:0}}>
+                      {signup.photo
+                        ?<img src={signup.photo} style={{width:56,height:56,borderRadius:"50%",objectFit:"cover",border:"2px solid var(--color-border-secondary)"}}/>
+                        :<div style={{width:56,height:56,borderRadius:"50%",background:"var(--color-border-tertiary)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>👤</div>
+                      }
+                    </div>
+                    <div>
+                      <p style={{margin:"0 0 6px",fontSize:12,fontWeight:500}}>Photo de profil</p>
+                      <label style={{border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",padding:"5px 12px",fontSize:12,cursor:"pointer",display:"inline-block"}}>
+                        {signup.photo?"Changer":"Ajouter une photo"}
+                        <input type="file" accept="image/*" style={{display:"none"}} onChange={handlePhotoSU}/>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                    <div>
+                      <label style={s.label}>Prénom *</label>
+                      <input placeholder="Manon" style={s.input} value={signup.prenom} onChange={e=>setSignup(p=>({...p,prenom:e.target.value,error:""}))}/>
+                    </div>
+                    <div>
+                      <label style={s.label}>Nom *</label>
+                      <input placeholder="Dupont" style={s.input} value={signup.nom} onChange={e=>setSignup(p=>({...p,nom:e.target.value,error:""}))}/>
+                    </div>
+                  </div>
+                  <label style={s.label}>Téléphone</label>
+                  <input placeholder="06 xx xx xx xx" style={s.input} value={signup.tel} onChange={e=>setSignup(p=>({...p,tel:e.target.value}))}/>
+                  <label style={s.label}>Nom de l'écurie</label>
+                  <input placeholder="Écuries AR" style={s.input} value={signup.ecurie} onChange={e=>setSignup(p=>({...p,ecurie:e.target.value}))}/>
+
+                  <label style={s.label}>Votre rôle *</label>
+                  <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
+                    {ROLE_OPTIONS.map(r=>(
+                      <button key={r.key} onClick={()=>setSignup(p=>({...p,role:r.key}))}
+                        style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",borderRadius:"var(--border-radius-md)",background:signup.role===r.key?ROLES[r.key].bg:"transparent",border:`2px solid ${signup.role===r.key?ROLES[r.key].color:"var(--color-border-tertiary)"}`,cursor:"pointer",textAlign:"left",width:"100%",transition:"all 0.15s"}}>
+                        <span style={{fontSize:20,flexShrink:0}}>{r.icon}</span>
+                        <div style={{flex:1}}>
+                          <p style={{margin:"0 0 2px",fontSize:13,fontWeight:signup.role===r.key?600:500,color:signup.role===r.key?ROLES[r.key].color:"var(--color-text-primary)"}}>{r.label}</p>
+                          <p style={{margin:0,fontSize:11,color:"var(--color-text-secondary)"}}>{r.desc}</p>
+                        </div>
+                        {!r.free&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:"var(--border-radius-md)",background:"#FAEEDA",color:"#854F0B",flexShrink:0,fontWeight:500}}>Validation requise</span>}
+                        <div style={{width:18,height:18,borderRadius:"50%",border:`2px solid ${signup.role===r.key?ROLES[r.key].color:"var(--color-border-secondary)"}`,background:signup.role===r.key?ROLES[r.key].color:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                          {signup.role===r.key&&<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+
+                  {signup.error&&<p style={{margin:"0 0 12px",fontSize:12,color:"#A32D2D",background:"#FCEBEB",padding:"8px 12px",borderRadius:"var(--border-radius-md)"}}>{signup.error}</p>}
+
+                  <div style={{display:"flex",gap:8}}>
+                    <button onClick={()=>setSignupStep(1)} style={{...s.btn(),flex:"0 0 auto",padding:"11px 16px",fontSize:13}}>←</button>
+                    <button onClick={submitStep2} style={{...s.btn("primary"),flex:1}}>Créer mon compte</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* INSCRIPTION TERMINÉE — en attente validation */}
+          {authMode==="signup"&&signupDone==="pending"&&(
+            <div style={{textAlign:"center",padding:"1rem 0"}}>
+              <div style={{fontSize:40,marginBottom:16}}>⏳</div>
+              <p style={{fontSize:15,fontWeight:500,marginBottom:8}}>Demande envoyée !</p>
+              <p style={{fontSize:13,color:"var(--color-text-secondary)",lineHeight:1.6,marginBottom:20}}>Ton compte <strong>{signup.role==="gestionnaire"?"Gestionnaire":"Centre équestre"}</strong> doit être validé par un administrateur. Tu recevras un email à <strong>{signup.email}</strong> dès que c'est approuvé.</p>
+              <button onClick={()=>setAuthMode("login")} style={s.btn("primary")}>Retour à la connexion</button>
+            </div>
+          )}
+
+          {/* DÉMO */}
           {authMode==="selector"&&(
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
-              <p style={{margin:"0 0 8px",fontSize:12,color:"var(--color-text-secondary)"}}>Explore chaque vue en un clic</p>
+              <p style={{margin:"0 0 8px",fontSize:12,color:"var(--color-text-secondary)"}}>Explore chaque vue en un clic · mot de passe démo : <strong>demo1234</strong></p>
               {DEMO_ACCOUNTS.map(a=>{
                 const r=ROLES[a.role];
                 return(
